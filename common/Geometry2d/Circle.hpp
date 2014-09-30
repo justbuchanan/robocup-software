@@ -1,11 +1,12 @@
 #pragma once
 
+#include "Shape.hpp"
 #include "Point.hpp"
 #include "Line.hpp"
 
 namespace Geometry2d
 {
-    class Circle
+    class Circle : public Shape
     {
     public:
         Circle()
@@ -20,7 +21,15 @@ namespace Geometry2d
             _r = r;
             _rsq = -1;
         }
+
+        Circle(const Circle &other) {
+            center = other.center;
+            _r = other.radius();
+        }
+
+        Shape *clone() const;
         
+
         // Both radius and radius-squared are stored, since some operations are more
         // efficient with one or the other.
         // As long as one is specified, the other is calculated lazily.
@@ -59,7 +68,11 @@ namespace Geometry2d
             _rsq = -1;
         }
         
-        bool contains(const Point &pt) const;
+        bool containsPoint(const Point &pt) const;
+
+        bool hit(const Point &pt) const;
+
+        bool hit(const Segment &pt) const;
         
         // Returns the number of points at which this circle intersects the given circle.
         // i must be null or point to two points.
@@ -78,6 +91,12 @@ namespace Geometry2d
         Point nearestPoint(const Geometry2d::Point &P) const;
 
         Point center;
+
+        std::string toString() {
+            std::stringstream str;
+            str << "Circle<" << center << ", " << radius() << ">";
+            return str.str();
+        }
         
     protected:
         // Radius

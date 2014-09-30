@@ -2,12 +2,13 @@
 
 #include <vector>
 
+#include "Shape.hpp"
 #include "Rect.hpp"
 #include "Segment.hpp"
 
 namespace Geometry2d
 {
-    class Polygon
+    class Polygon : public Shape
     {
     public:
         Polygon() {}
@@ -25,10 +26,21 @@ namespace Geometry2d
         {
             init(seg, r, length);
         }
+
+        Polygon(const Polygon &other) : vertices(other.vertices) {}
+
+        Shape *clone() const;
         
+        bool containsPoint(const Point &pt) const {
+            return contains(pt);
+        }
+
         bool contains(const Point &pt) const;
         bool intersects(const Rect &rect) const;
         bool intersects(const Polygon &other) const;
+
+        bool hit(const Geometry2d::Point &pt) const;
+        bool hit(const Geometry2d::Segment &seg) const;
         
         /// Returns true if this polygon contains any vertex of other.
         bool containsVertex(const Polygon &other) const;
@@ -39,6 +51,19 @@ namespace Geometry2d
         Rect bbox() const;
         
         std::vector<Point> vertices;
+
+        void addVertex(const Point &pt) {
+            vertices.push_back(pt);
+        }
+
+        std::string toString() {
+            std::stringstream str;
+            str << "Polygon<";
+            for(int i = 0; i < vertices.size(); i++)
+                str << vertices[i] << ", ";
+            str << ">";
+            return str.str();
+        }
     
     protected:
         /// Used by constructors

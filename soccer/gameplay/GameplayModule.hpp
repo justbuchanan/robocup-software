@@ -1,8 +1,14 @@
 
 #pragma once
 
+//	note: for an odd Qt-related issue, this python include has to come before
+//			the Qt includes (because of the 'slots' macro)
+#include <boost/python.hpp>
+
+#include <Geometry2d/TransformMatrix.hpp>
+#include <Geometry2d/Polygon.hpp>
 #include <Geometry2d/Point.hpp>
-#include <planning/Obstacle.hpp>
+#include <Geometry2d/CompositeShape.hpp>
 
 #include <set>
 #include <QMutex>
@@ -12,7 +18,7 @@
 
 class OurRobot;
 class SystemState;
-class Configuration;
+
 
 /**
  * @brief Higher-level logic for soccer
@@ -21,20 +27,11 @@ class Configuration;
  */
 namespace Gameplay
 {
-	class Play;
-	class PlayFactory;
-	
-	namespace Behaviors
-	{
-		class Goalie;
-	}
-	
 	/**
 	 * @brief Coordinator of high-level logic
 	 * 
 	 * @details Its main responsibilities include:
 	 * - managing the Goalie
-	 * - managing the joystick-controlled robot (if any)
 	 * - maintaining a list of global field obstacles
 	 * - choosing which Play to run
 	 * - running the current play
@@ -53,29 +50,9 @@ namespace Gameplay
 			
 			virtual void run();
 			
-			/**
-			 * @brief ID of joystick-controlled robot
-			 * @details This is just a convenience method.  The Processor is the one in charge
-			 * of managing manualID.
-			 */
-			int manualID() const;
-			
-			void createGoalie();
-			void removeGoalie();
-			
-			Behaviors::Goalie *goalie() const
-			{
-				return _goalie;
-			}
+			void setupUI();
 
-			void goalieID(int value)
-			{
-				if(_goalieID == -1)
-					createGoalie();
-				_goalieID = value;
-				if(_goalieID == -1)
-					removeGoalie();
-			}
+			void goalieID(int value);
 			int goalieID()
 			{
 				return _goalieID;
@@ -119,87 +96,60 @@ namespace Gameplay
 				return _oppMatrix;
 			}
 			
-			/**
-			 * Returns the name of the current play
-			 */
-			QString playName()
-			{
-				return _playName;
-			}
-			
 			/// All robots on our team that are usable by plays
 			const std::set<OurRobot *> &playRobots() const
 			{
 				return _playRobots;
 			}
 
-			/**
-			 * @brief Resets the avoidBallRadius for each OurRobot
-			 */
-			void clearAvoidBallRadii();
+
+		protected:
+
+			boost::python::object getRootPlay();
+
+			///	gets the instance of the main.py module that's loaded at GameplayModule
+			boost::python::object getMainModule();
 
 			
 		private:
-			friend class Play;
-			
 			/// This protects all of Gameplay.
 			/// This is held while plays are running.
 			QMutex _mutex;
 			
 			SystemState *_state;
 			
-			Configuration *_config;
-
-			/// The goalie behavior (may be null)
-			Behaviors::Goalie *_goalie;
-			
 			std::set<OurRobot *> _playRobots;
-			
-			/// The current play
-			std::shared_ptr<Play> _currentPlay;
-			
-			/// Factory which produced the current play
-			PlayFactory *_currentPlayFactory;
-			
-			/// True if the current play is finished and a new one should be selected during the next frame
-			bool _playDone;
 			
 			Geometry2d::TransformMatrix _ballMatrix;
 			Geometry2d::TransformMatrix _centerMatrix;
 			Geometry2d::TransformMatrix _oppMatrix;
 			
 			/// Obstacles to prevent using half the field
-			std::shared_ptr<PolygonObstacle> _ourHalf;
-			std::shared_ptr<PolygonObstacle> _opponentHalf;
+			std::shared_ptr<Geometry2d::Polygon> _ourHalf;
+			std::shared_ptr<Geometry2d::Polygon> _opponentHalf;
 			
-			ObstaclePtr _sideObstacle;
+			std::shared_ptr<Geometry2d::Shape> _sideObstacle;
 			
 			///	outside of the floor boundaries
-			ObstaclePtr _nonFloor[4];
+			std::shared_ptr<Geometry2d::Shape> _nonFloor[4];
 			
 			///	goal area
-			ObstacleGroup _goalArea;
-			
-			/// Name of the current play
-			QString _playName;
+			Geometry2d::CompositeShape _goalArea;
 
 			/// utility functions
 
 			/**
-			 * Checks the current play to determine if it is necessary to find a new one,
-			 * and performs necessary updates
-			 */
-			void updatePlay();
-
-			/**
 			 * Returns the current set of global obstacles, including the field
 			 */
-			ObstacleGroup globalObstacles() const;
+			Geometry2d::CompositeShape globalObstacles() const;
 
 			int _our_score_last_frame;
 
-			// Board ID of the robot to assign the goalie position
+			// Shell ID of the robot to assign the goalie position
 			int _goalieID;
 
+
+			//	python
+			boost::python::object _mainPyNamespace;
 	};
 }

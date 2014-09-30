@@ -1,4 +1,6 @@
 #pragma once
+#include "TeamInfo.hpp"
+
 /**
  * this is the set of rules that are in effect
  */
@@ -47,6 +49,9 @@ public:
     
     // Time in seconds remaining in the current period
     int secondsRemaining;
+
+    TeamInfo OurInfo;
+    TeamInfo TheirInfo;
     
     GameState()
     {
@@ -85,6 +90,10 @@ public:
     bool penalty() const
     {
         return restart == Penalty;
+    }
+
+    bool isOurRestart() const {
+        return ourRestart;
     }
     
     bool direct() const
@@ -151,6 +160,14 @@ public:
     bool setupRestart() const
     {
         return state == Setup || state == Ready;
+    }
+    
+    bool inSetupState() const {
+        return state == Setup;
+    }
+
+    bool inReadyState() const {
+        return state == Ready;
     }
     
     // One of our robots can kick the ball

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Shape.hpp"
 #include "Point.hpp"
 #include "util.h"
 
@@ -9,7 +10,7 @@ namespace Geometry2d
 {
 	class Segment;
 	
-	class Rect
+	class Rect : public Shape
 	{
 		public:
 			Rect() {}
@@ -24,6 +25,13 @@ namespace Geometry2d
 				pt[0] = p1;
 				pt[1] = p2;
 			}
+
+			Rect(const Rect &other) {
+				pt[0] = other.pt[0];
+				pt[1] = other.pt[1];
+			}
+
+			Shape *clone() const;
 
 			Rect &operator+=(const Point &offset)
 			{
@@ -62,6 +70,17 @@ namespace Geometry2d
 			bool contains(const Point &other) const;
 			bool contains(const Rect &other) const;
 
+			bool containsPoint(const Point &other) const {
+				return contains(other);
+			}
+
+
+	        bool hit(const Point &pt) const {
+	        	return contains(pt);
+	        }
+
+	        bool hit(const Segment &seg) const;
+
 			Point center() const { return (pt[0] + pt[1]) / 2; }
 
 			void expand(const Point &pt);
@@ -78,5 +97,11 @@ namespace Geometry2d
 			bool intersects(const Rect &other) const;
 			
 			Point pt[2];
+
+			std::string toString() {
+				std::stringstream str;
+				str << "Line<" << pt[0] << ", " << pt[1] << ">";
+				return str.str();
+			}
 	};
 }

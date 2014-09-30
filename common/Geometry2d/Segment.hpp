@@ -6,10 +6,10 @@
 #include "Line.hpp"
 #include "Circle.hpp"
 
+#include <memory>
+
 namespace Geometry2d
 {	
-	class Rect;
-	
 	class Segment: public Line
 	{
 		public:
@@ -49,5 +49,16 @@ namespace Geometry2d
 			
 			bool intersects(const Segment &other, Point *intr = 0) const;
 			bool intersects(const Circle& circle) const;
+
+			//	Same as the segment intersection above, but returns the intersection
+			//	point or nullptr rather than returning a bool and setting an out variable
+			//	This was added to be used with python code, but is useful in c++ as well
+			std::shared_ptr<Point> intersection(const Segment &other);
+
+			std::string toString() {
+				std::stringstream str;
+				str << "Line<" << pt[0] << ", " << pt[1] << ">";
+				return str.str();
+			}
 	};
 }

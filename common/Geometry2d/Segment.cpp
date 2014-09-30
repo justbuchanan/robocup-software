@@ -1,5 +1,6 @@
 
 #include "Segment.hpp"
+#include <sstream>
 
 using namespace std;
 using namespace Geometry2d;
@@ -23,7 +24,10 @@ float Segment::distTo(const Point &other) const
 	Point dp = pt[1] - pt[0];
 	float d = dp.dot(other - pt[0]);
 
-	if (d < 0)
+	if(dp.magsq() == 0)
+	{
+		return pt[0].distTo(other);
+	} else if (d < 0)
 	{
 		// Nearest point on the segment is pt[0]
 		return other.distTo(pt[0]);
@@ -83,6 +87,16 @@ bool Segment::intersects(const Segment &other, Point *intr) const
 	}
 
 	return true;
+}
+
+std::shared_ptr<Point> Segment::intersection(const Segment &other) {
+	Point pointOut;
+	bool doesIt = intersects(other, &pointOut);
+	if (doesIt) {
+		return std::make_shared<Point>(pointOut);
+	} else {
+		return nullptr;
+	}
 }
 
 bool Segment::intersects(const Circle& circle) const
@@ -168,6 +182,9 @@ bool Segment::nearPointPerp(const Point &point, float threshold) const {
 Point Segment::nearestPoint(const Point& p) const
 {
 	const float magsq = delta().magsq();
+
+	if(magsq == 0)
+		return pt[0];
 	
     Point v_hat = delta()/sqrt(magsq);
 	float t = v_hat.dot(p - pt[0]);

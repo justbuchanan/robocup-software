@@ -6,19 +6,19 @@
 #include <QThread>
 #include <QMutex>
 #include <QMutexLocker>
-#include <QUdpSocket>
 
 #include <protobuf/LogFrame.pb.h>
-#include <Network.hpp>
 #include <Logger.hpp>
 #include <Geometry2d/TransformMatrix.hpp>
 #include <SystemState.hpp>
 #include <modeling/RobotFilter.hpp>
+#include <NewRefereeModule.hpp>
+#include "VisionReceiver.hpp"
 
 class Configuration;
 class RobotStatus;
 class Joystick;
-class RefereeModule;
+struct JoystickControlValues;
 class Radio;
 class BallTracker;
 
@@ -36,6 +36,34 @@ namespace Motion
 {
 	class RobotController;
 }
+
+
+
+class DebugQMutex: public QMutex {
+public:
+	DebugQMutex(QMutex::RecursionMode mode = QMutex::NonRecursive) : QMutex(mode) {}
+
+	void lock() {
+		// printf("thread %ld tries to lock\n", QThread::currentThreadId());
+		QMutex::lock();
+	}
+
+	bool tryLock() {
+		// printf("tryLock\n");
+		return QMutex::tryLock();
+	}
+
+	bool tryLock(int timeout) {
+		// printf("tryLock\n");
+		return QMutex::tryLock(timeout);
+	}
+
+	void unlock() {
+		QMutex::unlock();
+		// printf("thread %ld unlocked\n", QThread::currentThreadId());
+	}
+};
+
 
 /**
  * @brief Brings all the pieces together
@@ -80,6 +108,8 @@ class Processor: public QThread
 		
 		bool autonomous();
 		bool joystickValid();
+
+		JoystickControlValues joystickControlValues();
 		
 		void externalReferee(bool value)
 		{
@@ -123,7 +153,7 @@ class Processor: public QThread
 			return _gameplayModule;
 		}
 		
-		std::shared_ptr<RefereeModule> refereeModule() const
+		std::shared_ptr<NewRefereeModule> refereeModule() const
 		{
 			return _refereeModule;
 		}
@@ -145,9 +175,6 @@ class Processor: public QThread
 			QMutexLocker lock(&_statusMutex);
 			return _status;
 		}
-		
-		// Simulates a command from the referee
-		void internalRefCommand(char ch);
 		
 		float framerate()
 		{
@@ -186,9 +213,11 @@ class Processor: public QThread
 		}
 		
 		Radio *radio()
-		{
+        {
 			return _radio;
 		}
+
+		void changeVisionChannel(int port);
 		
 		////////
 		
@@ -230,7 +259,7 @@ class Processor: public QThread
 		
 		// Locked when processing loop stuff is happening (not when blocked for timing or I/O).
 		// This is public so the GUI thread can lock it to access SystemState, etc.
-		QMutex _loopMutex;
+		DebugQMutex _loopMutex;
 		
 		/** global system state */
 		SystemState _state;
@@ -260,14 +289,13 @@ class Processor: public QThread
 		// This is used by the GUI to indicate status of the processing loop and network
 		QMutex _statusMutex;
 		Status _status;
-		
-		// Network sockets
-		QUdpSocket *_refereeSocket;
 
 		//modules
-		std::shared_ptr<RefereeModule> _refereeModule;
+		std::shared_ptr<NewRefereeModule> _refereeModule;
 		std::shared_ptr<Gameplay::GameplayModule> _gameplayModule;
 		std::shared_ptr<BallTracker> _ballTracker;
 
 		Joystick *_joystick;
+
+		VisionReceiver vision;
 };

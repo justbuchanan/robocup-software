@@ -1,10 +1,15 @@
 
 #include "Path.hpp"
 #include "Utils.hpp"
+#include "motion/TrapezoidalMotion.hpp"
 
 #include <stdexcept>
 
 using namespace std;
+using namespace Planning;
+
+
+#pragma mark Path
 
 Planning::Path::Path(const Geometry2d::Point& p0) {
 	points.push_back(p0);
@@ -30,7 +35,7 @@ float Planning::Path::length(unsigned int start) const
     return length;
 }
 
-Geometry2d::Point::Optional Planning::Path::start() const
+boost::optional<Geometry2d::Point> Planning::Path::start() const
 {
 		if (points.empty())
 			return boost::none;
@@ -38,7 +43,7 @@ Geometry2d::Point::Optional Planning::Path::start() const
 			return points.front();
 }
 
-Geometry2d::Point::Optional Planning::Path::destination() const
+boost::optional<Geometry2d::Point> Planning::Path::destination() const
 {
 		if (points.empty())
 			return boost::none;
@@ -70,7 +75,7 @@ int Planning::Path::nearestIndex(const Geometry2d::Point &pt) const
 	return index;
 }
 
-bool Planning::Path::hit(const ObstacleGroup &obstacles, unsigned int start) const
+bool Planning::Path::hit(const Geometry2d::CompositeShape &obstacles, unsigned int start) const
 {
     if (start >= points.size())
     {
@@ -79,16 +84,16 @@ bool Planning::Path::hit(const ObstacleGroup &obstacles, unsigned int start) con
     }
     
     // The set of obstacles the starting point was inside of
-    ObstacleGroup hit;
+    std::set<std::shared_ptr<Geometry2d::Shape> > hit;
     obstacles.hit(points[start], hit);
     
     for (unsigned int i = start; i < (points.size() - 1); ++i)
     {
-        ObstacleGroup newHit;
+        std::set<std::shared_ptr<Geometry2d::Shape> > newHit;
         obstacles.hit(Geometry2d::Segment(points[i], points[i + 1]), newHit);
         try
         {
-            set_difference(newHit.begin(), newHit.end(), hit.begin(), hit.end(), ExceptionIterator<ObstaclePtr>());
+            set_difference(newHit.begin(), newHit.end(), hit.begin(), hit.end(), ExceptionIterator<std::shared_ptr<Geometry2d::Shape>>());
         } catch (exception& e)
         {
             // Going into a new obstacle
@@ -223,4 +228,59 @@ float Planning::Path::length(const Geometry2d::Point &pt) const
 	}
 	
 	return length;
+}
+
+bool Planning::Path::getPoint(float distance ,Geometry2d::Point &position, Geometry2d::Point &direction) const
+{
+	if (points.empty())
+	{
+		return false;
+	}
+	for (unsigned int i = 0; i < (points.size() - 1); ++i)
+    {
+    	Geometry2d::Point vector(points[i + 1] - points[i]);
+		//Geometry2d::Segment s(points[i], points[i+1]);
+		
+		float vectorLength = vector.mag();
+		distance -= vectorLength;
+		
+		if(distance<=0) 
+		{
+			distance += vectorLength;
+			position = points[i] + (vector * (distance / vectorLength));
+			direction = vector.normalized();
+			return true;
+		}
+	}
+	return false;
+
+}
+
+
+bool Planning::Path::evaluate(float t, Geometry2d::Point &targetPosOut, Geometry2d::Point &targetVelOut) const
+{
+    if (maxSpeed == -1 || maxAcceleration == -1) {
+        throw std::runtime_error("You must set maxSpeed and maxAcceleration before calling Path.evaluate()");
+    }
+
+	float linearPos;
+	float linearSpeed;
+	bool pathIsValid = TrapezoidalMotion(
+        length(),
+        maxSpeed,
+        maxAcceleration,
+        t,
+        startSpeed,
+        endSpeed,
+        linearPos,      //  these are set by reference since C++ can't return multiple values
+        linearSpeed);   //
+
+	Geometry2d::Point direction;
+	if(!getPoint(linearPos, targetPosOut, direction)) {
+		return false;
+	}
+
+	targetVelOut = direction * linearSpeed;
+
+	return pathIsValid;
 }

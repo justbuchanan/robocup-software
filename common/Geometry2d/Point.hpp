@@ -4,6 +4,7 @@
 #include <boost/optional.hpp>
 #include <QPointF>
 #include <protobuf/Point.pb.h>
+#include <sstream>
 
 #include "util.h"
 
@@ -15,8 +16,6 @@ namespace Geometry2d
 	class Point
 	{
 		public:
-			typedef boost::optional<Point> Optional;
-
 			/**
 			default constrctor.
 			initializes point to (0,0)
@@ -69,6 +68,18 @@ namespace Geometry2d
 			{
 				return Point(x + other.x, y + other.y);
 			}
+
+			/**
+			 * see operator+
+			 * does vector division, note the operator
+			 * without parameter, it is the negative
+			 */
+			Point operator/(Point other) const
+			{
+				return Point(x / other.x, y / other.y);
+			}
+
+
 			/**
 			 * see operator+
 			 * does vector subtraction, note the operator
@@ -207,11 +218,24 @@ namespace Geometry2d
 			{
 				return x * x + y * y;
 			}
+
+			/**
+			 * @brief Restricts the point to a given magnitude
+			 * @param max The magnitude to restrict the vector
+			 */
+			void clamp(float max)
+			{	
+				if (mag() > max) {
+					float ratio = mag() / max;
+					x = x / ratio;
+					y = y / ratio;
+				}
+			}
 			
 			/**
 			rotates the point around another point by specified angle in the CCW direction
 			@param origin the point to rotate around
-			@param angle the angle in degrees
+			@param angle the angle in radians
 			*/
 			void rotate(const Point &origin, float angle)
 			{
@@ -225,8 +249,8 @@ namespace Geometry2d
 			*/
 			void rotate(float angle)
 			{
-				float newX = x * cos(angle * DegreesToRadians) - y * sin(angle * DegreesToRadians);
-				float newY = y * cos(angle * DegreesToRadians) + x * sin(angle * DegreesToRadians);
+				float newX = x * cos(angle) - y * sin(angle);
+				float newY = y * cos(angle) + x * sin(angle);
 				x = newX;
 				y = newY;
 			}
@@ -236,8 +260,8 @@ namespace Geometry2d
 			 */
 			Point rotated(float angle) const
 			{
-				float newX = x * cos(angle * DegreesToRadians) - y * sin(angle * DegreesToRadians);
-				float newY = y * cos(angle * DegreesToRadians) + x * sin(angle * DegreesToRadians);
+				float newX = x * cos(angle) - y * sin(angle);
+				float newY = y * cos(angle) + x * sin(angle);
 				return Point(newX, newY);
 			}
 
@@ -334,6 +358,18 @@ namespace Geometry2d
 				return x * other.y - y * other.x;
 			}
 			
+			std::string toString()
+			{
+				std::stringstream str;
+				str << "Point(" << x << ", " << y << ")";
+				return str.str();
+			}
+
+			friend std::ostream& operator<< (std::ostream &stream, Point &point) {
+				stream << point.toString();
+				return stream;
+			}
+
 			/** the x coordinate */
 			float x;
 			

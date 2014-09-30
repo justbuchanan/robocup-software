@@ -17,8 +17,8 @@ const float Ball_Diameter = 0.043f;
 const float Ball_Radius = Ball_Diameter/2.0f;
 const float Ball_Mass = 0.048f;
 
-const float Field_Length = 6.05f;
-const float Field_Width = 4.05f;
+const float Field_Length = 6.5f;
+const float Field_Width = 4.455f;
 const float Field_Border = 0.25f;
 
 const float Field_LineWidth = 0.01f;
@@ -53,3 +53,7 @@ const float Robot_MouthWidth = 0.10f;
 const float Dots_Small_Offset = 0.035;
 const float Dots_Large_Offset = 0.054772;
 const float Dots_Radius = 0.02;
+
+/// timestamp() returns the current time in microseconds.  Multiply by this constant to get to seconds.
+const float TimestampToSecs = 1.0f / 1000000.0f;
+const float SecsToTimestamp = 1.0f / TimestampToSecs;

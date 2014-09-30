@@ -1,4 +1,6 @@
 
+#include <gameplay/GameplayModule.hpp>
+
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -15,10 +17,9 @@
 
 #include <boost/foreach.hpp>
 
-#include "PlayConfigTab.hpp"
 #include "MainWindow.hpp"
-//#include "debug.hpp"
 #include "Configuration.hpp"
+
 
 using namespace std;
 
@@ -106,6 +107,13 @@ using namespace std;
 //void (*__malloc_initialize_hook)(void) = md_init_hook;
 ////END memory debugging
 
+
+//  we use this to catch Ctrl+C and kill the program
+void signal_handler(int signum) {
+    exit(signum);
+}
+
+
 void usage(const char* prog)
 {
 	fprintf(stderr, "usage: %s [options...]\n", prog);
@@ -126,7 +134,8 @@ int main (int argc, char* argv[])
 {
 	printf("Starting Soccer...\n");
 
-//	debugInit(argv[0]);  // FIXME: re-enable debugging
+    //  register our signal handler
+    signal(SIGINT, signal_handler);
 
 	// Seed the large random number generator
 	long int seed = 0;
@@ -243,7 +252,6 @@ int main (int argc, char* argv[])
 			usage(argv[0]);
 		}
 	}
-	
 
 
 	printf("Running on %s\n", sim ? "simulation" : "real hardware");
@@ -258,14 +266,13 @@ int main (int argc, char* argv[])
 	}
 	
 	Configuration config;
-
-	Processor *processor = new Processor(sim);
-	processor->blueTeam(blueTeam);
-
 	BOOST_FOREACH(Configurable *obj, Configurable::configurables())
 	{
 		obj->createConfiguration(&config);
 	}
+
+	Processor *processor = new Processor(sim);
+	processor->blueTeam(blueTeam);
 	
 	// Load config file
 	QString error;
@@ -278,20 +285,6 @@ int main (int argc, char* argv[])
 	MainWindow *win = new MainWindow;
 	win->configuration(&config);
 	win->processor(processor);
-	
-	if (!playbook.isNull())
-	{
-		win->playConfigTab()->load(playbook);
-	} else if (extraPlays.empty())
-	{
-		// Try to load a default playbook
-		win->playConfigTab()->load("default.pbk");
-	}
-	
-	BOOST_FOREACH(const QString &str, extraPlays)
-	{
-		win->playConfigTab()->enable(str);
-	}
 	
 	if (!QDir("logs").exists())
 	{
@@ -321,7 +314,9 @@ int main (int argc, char* argv[])
 	
 	processor->start();
 	
-	win->showMaximized();
+	win->show();
+
+	processor->gameplayModule()->setupUI();
 
 	int ret = app.exec();
 	processor->stop();

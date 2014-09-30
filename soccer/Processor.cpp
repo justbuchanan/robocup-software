@@ -1,6 +1,6 @@
 
+#include <gameplay/GameplayModule.hpp>
 #include "Processor.hpp"
-#include "VisionReceiver.hpp"
 #include "radio/SimRadio.hpp"
 #include "radio/USBRadio.hpp"
 #include "modeling/BallTracker.hpp"
@@ -10,16 +10,13 @@
 #include <poll.h>
 #include <multicast.hpp>
 #include <Constants.hpp>
-#include <Network.hpp>
 #include <Utils.hpp>
 #include <Joystick.hpp>
 #include <LogUtils.hpp>
 #include <Robot.hpp>
 
 #include <motion/MotionControl.hpp>
-#include <gameplay/GameplayModule.hpp>
 #include <RobotConfig.hpp>
-#include <RefereeModule.hpp>
 
 #include <boost/foreach.hpp>
 #include <boost/make_shared.hpp>
@@ -55,7 +52,7 @@ void Processor::createConfiguration(Configuration *cfg)
 	}
 }
 
-Processor::Processor(bool sim)
+Processor::Processor(bool sim) : _loopMutex(QMutex::Recursive)
 {
 	_running = true;
 	_framePeriod = 1000000 / 60;
@@ -77,8 +74,10 @@ Processor::Processor(bool sim)
 	QMetaObject::connectSlotsByName(this);
 
 	_ballTracker = std::make_shared<BallTracker>();
-	_refereeModule = std::make_shared<RefereeModule>(&_state);
+	_refereeModule = std::make_shared<NewRefereeModule>(_state);
+	_refereeModule->start();
 	_gameplayModule = std::make_shared<Gameplay::GameplayModule>(&_state);
+	vision.simulation = _simulation;
 }
 
 Processor::~Processor()
@@ -88,7 +87,7 @@ Processor::~Processor()
 	delete _joystick;
 	
 	//DEBUG - This is unnecessary, but lets us determine which one breaks.
-	_refereeModule.reset();
+	//_refereeModule.reset();
 	_gameplayModule.reset();
 }
 
@@ -139,82 +138,17 @@ void Processor::dampedTranslation(bool value)
 void Processor::blueTeam(bool value)
 {
 	// This is called from the GUI thread
-	QMutexLocker locker(&_loopMutex);
-	
-	_blueTeam = value;
-	_refereeModule->blueTeam(value);
+    QMutexLocker locker(&_loopMutex);
+
+    if(_blueTeam != value)
+    {
+        _blueTeam = value;
+        if(_radio)
+            _radio->switchTeam(_blueTeam);
+        //_refereeModule->blueTeam(value);
+    }
 }
-/**
- * changes the scores on the field
- * @param ch the command representing who scored in a goal
- */
-void Processor::internalRefCommand(char ch)
-{
-	QMutexLocker locker(&_loopMutex);
-	
-	// Change scores
-	switch (ch)
-	{
-		case RefereeCommands::GoalBlue:
-			if (blueTeam())
-			{
-				++state()->gameState.ourScore;
-			} else {
-				++state()->gameState.theirScore;
-			}
-			break;
-		
-		case RefereeCommands::SubtractGoalBlue:
-			if (blueTeam())
-			{
-				if (state()->gameState.ourScore)
-				{
-					--state()->gameState.ourScore;
-				}
-			} else {
-				if (state()->gameState.theirScore)
-				{
-					--state()->gameState.theirScore;
-				}
-			}
-			break;
-		
-		case RefereeCommands::GoalYellow:
-			if (blueTeam())
-			{
-				++state()->gameState.theirScore;
-			} else {
-				++state()->gameState.ourScore;
-			}
-			break;
-		
-		case RefereeCommands::SubtractGoalYellow:
-			if (blueTeam())
-			{
-				if (state()->gameState.theirScore)
-				{
-					--state()->gameState.theirScore;
-				}
-			} else {
-				if (state()->gameState.ourScore)
-				{
-					--state()->gameState.ourScore;
-				}
-			}
-			break;
-	}
-	
-	// Send the command to the referee handler
-	_refereeModule->command(ch);
-}
-/**
- * @return true if the robots are on AI else the robots are on joystick
- */
-bool Processor::autonomous()
-{
-	QMutexLocker lock(&_loopMutex);
-	return _joystick->autonomous();
-}
+
 /**
  * I believe this checks whether or not there is a joystick
  */
@@ -224,13 +158,17 @@ bool Processor::joystickValid()
 	return _joystick->valid();
 }
 
+JoystickControlValues Processor::joystickControlValues() {
+	return _joystick->getJoystickControlValues();
+}
+
 void Processor::runModels(const vector<const SSL_DetectionFrame *> &detectionFrames)
 {
 	vector<BallObservation> ballObservations;
 	
 	BOOST_FOREACH(const SSL_DetectionFrame* frame, detectionFrames)
 	{
-		uint64_t time = frame->t_capture() * 1000000;
+		uint64_t time = frame->t_capture() * SecsToTimestamp;
 		
 		// Add ball observations
 		ballObservations.reserve(ballObservations.size() + frame->balls().size());
@@ -243,8 +181,8 @@ void Processor::runModels(const vector<const SSL_DetectionFrame *> &detectionFra
 		const RepeatedPtrField<SSL_DetectionRobot> &selfRobots = _blueTeam ? frame->robots_blue() : frame->robots_yellow();
 		BOOST_FOREACH(const SSL_DetectionRobot &robot, selfRobots)
 		{
-			float angle = fixAngleDegrees(robot.orientation() * RadiansToDegrees + _teamAngle);
-			RobotObservation obs(_worldToTeam * Point(robot.x() / 1000, robot.y() / 1000), angle, time, frame->frame_number());
+			float angleRad = fixAngleRadians(robot.orientation() + _teamAngle);
+			RobotObservation obs(_worldToTeam * Point(robot.x() / 1000, robot.y() / 1000), angleRad, time, frame->frame_number());
 			obs.source = frame->camera_id();
 			unsigned int id = robot.robot_id();
 			if (id < _state.self.size())
@@ -256,8 +194,8 @@ void Processor::runModels(const vector<const SSL_DetectionFrame *> &detectionFra
 		const RepeatedPtrField<SSL_DetectionRobot> &oppRobots = _blueTeam ? frame->robots_yellow() : frame->robots_blue();
 		BOOST_FOREACH(const SSL_DetectionRobot &robot, oppRobots)
 		{
-			float angle = fixAngleDegrees(robot.orientation() * RadiansToDegrees + _teamAngle);
-			RobotObservation obs(_worldToTeam * Point(robot.x() / 1000, robot.y() / 1000), angle, time, frame->frame_number());
+			float angleRad = fixAngleRadians(robot.orientation() + _teamAngle);
+			RobotObservation obs(_worldToTeam * Point(robot.x() / 1000, robot.y() / 1000), angleRad, time, frame->frame_number());
 			obs.source = frame->camera_id();
 			unsigned int id = robot.robot_id();
 			if (id < _state.opp.size())
@@ -284,18 +222,10 @@ void Processor::runModels(const vector<const SSL_DetectionFrame *> &detectionFra
  */
 void Processor::run()
 {
-	VisionReceiver vision(_simulation);
 	vision.start();
-	
-	// Create referee socket
-	_refereeSocket = new QUdpSocket;
-	if (!_refereeSocket->bind(RefereePort, QUdpSocket::ShareAddress)) {
-		throw runtime_error("Can't bind to referee port");
-	}
-	multicast_add(_refereeSocket, RefereeAddress);
 
-	// Create radio socket
-	_radio = _simulation ? (Radio *)new SimRadio() : (Radio *)new USBRadio();
+    // Create radio socket
+    _radio = _simulation ? (Radio *)new SimRadio(_blueTeam) : (Radio *)new USBRadio();
 	
 	Status curStatus;
 	
@@ -420,30 +350,6 @@ void Processor::run()
 			}
 		}
 		
-		// Read referee packets
-		while (_refereeSocket->hasPendingDatagrams())
-		{
-			unsigned int n = _refereeSocket->pendingDatagramSize();
-			string str(6, 0);
-			_refereeSocket->readDatagram(&str[0], str.size());
-			
-			// Check the size after receiving to discard bad packets
-			if (n != str.size())
-			{
-				printf("Bad referee packet of %d bytes\n", n);
-				continue;
-			}
-			
-			// Log the referee packet, but only use it if external referee is enabled
-			curStatus.lastRefereeTime = timestamp();
-			_state.logFrame->add_raw_referee(str);
-			
-			if (_externalReferee)
-			{
-				_refereeModule->packet(str);
-			}
-		}
-		
 		// Read radio reverse packets
 		_radio->receive();
 		BOOST_FOREACH(const Packet::RadioRx &rx, _radio->reversePackets())
@@ -459,6 +365,7 @@ void Processor::run()
 				// We have to copy because the RX packet will survive past this frame
 				// but LogFrame will not (the RadioRx in LogFrame will be reused).
 				_state.self[board]->radioRx().CopyFrom(rx);
+				_state.self[board]->radioRxUpdated();
 			}
 		}
 		_radio->clear();
@@ -469,10 +376,9 @@ void Processor::run()
 		
 		runModels(detectionFrames);
 
-		if (_refereeModule)
-		{
-			_refereeModule->run();
-		}
+		// Update gamestate w/ referee data
+		_refereeModule->updateGameState(blueTeam());
+		_refereeModule->spinKickWatcher();
 		
 		if (_gameplayModule)
 		{
@@ -484,19 +390,17 @@ void Processor::run()
 		{
 			if (robot->visible)
 			{
-				if ((_manualID >= 0 && (int)robot->shell() == _manualID) || !_joystick->autonomous() || _state.gameState.halt())
+				if ((_manualID >= 0 && (int)robot->shell() == _manualID) || _state.gameState.halt())
 				{
 					robot->motionControl()->stopped();
-				}
-				
-				robot->motionControl()->run();
+				} else {
+					robot->motionControl()->run();	
+				}	
 			}
 		}
 
 		////////////////
 		// Store logging information
-		
-		_state.logFrame->set_play(_gameplayModule->playName().toStdString());
 		
 		// Debug layers
 		const QStringList &layers = _state.debugLayers();
@@ -515,8 +419,8 @@ void Processor::run()
 				Packet::LogFrame::Robot *log = _state.logFrame->add_self();
 				*log->mutable_pos() = r->pos;
 				*log->mutable_vel() = r->vel;
-				*log->mutable_cmd_vel() = r->cmd_vel;
-				log->set_cmd_w(r->cmd_w);
+				// *log->mutable_cmd_vel() = r->cmd_vel;
+				// log->set_cmd_w(r->cmd_w);
 				log->set_shell(r->shell());
 				log->set_angle(r->angle);
 				
@@ -614,17 +518,14 @@ void Processor::run()
 	}
 	
 	vision.stop();
-	
-	delete _refereeSocket;
-	_refereeSocket = nullptr;
 }
 
 void Processor::sendRadioData()
 {
-	Packet::RadioTx *tx = _state.logFrame->mutable_radio_tx();
+    Packet::RadioTx *tx = _state.logFrame->mutable_radio_tx();
 	
 	// Halt overrides normal motion control, but not joystick
-	if (!_joystick->autonomous() || _state.gameState.halt())
+	if (_state.gameState.halt())
 	{
 		// Force all motor speeds to zero
 		BOOST_FOREACH(OurRobot *r, _state.self)
@@ -669,7 +570,7 @@ void Processor::sendRadioData()
 	}
 
 	if (_radio)
-	{
+    {
 		_radio->send(*_state.logFrame->mutable_radio_tx());
 	}
 }
@@ -680,11 +581,24 @@ void Processor::defendPlusX(bool value)
 
 	if (_defendPlusX)
 	{
-		_teamAngle = -90;
+		_teamAngle = -M_PI_2;
 	} else {
-		_teamAngle = 90;
+		_teamAngle = M_PI_2;
 	}
 
 	_worldToTeam = Geometry2d::TransformMatrix::translate(Geometry2d::Point(0, Field_Length / 2.0f));
 	_worldToTeam *= Geometry2d::TransformMatrix::rotate(_teamAngle);
+}
+
+void Processor::changeVisionChannel(int port)
+{
+	_loopMutex.lock();
+
+	vision.stop();
+
+	vision.simulation = _simulation;
+	vision.port = port;
+	vision.start();
+
+	_loopMutex.unlock();
 }

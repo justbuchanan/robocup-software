@@ -1,216 +1,190 @@
 
 #include <gameplay/GameplayModule.hpp>
-#include <gameplay/Behavior.hpp>
-#include <gameplay/behaviors/positions/Goalie.hpp>
-#include <gameplay/Play.hpp>
 #include <Constants.hpp>
 #include <protobuf/LogFrame.pb.h>
 #include <Robot.hpp>
+#include <SystemState.hpp>
 
 #include <stdio.h>
 #include <iostream>
 #include <boost/foreach.hpp>
 #include <boost/make_shared.hpp>
 
+//	for python stuff
+#include "robocup-py.hpp"
+
 using namespace std;
 using namespace boost;
-/**
- * handles gameplay: choosing plays, and doing them
- */
+using namespace boost::python;
+
+using namespace Geometry2d;
+
+
+
 Gameplay::GameplayModule::GameplayModule(SystemState *state):
 	_mutex(QMutex::Recursive)
 {
 	_state = state;
-	_goalie = 0;
-	_currentPlayFactory = 0;
-	_playDone = false;
 
 	_centerMatrix = Geometry2d::TransformMatrix::translate(Geometry2d::Point(0, Field_Length / 2));
 	_oppMatrix = Geometry2d::TransformMatrix::translate(Geometry2d::Point(0, Field_Length)) *
-				Geometry2d::TransformMatrix::rotate(180);
+				Geometry2d::TransformMatrix::rotate(M_PI);
 
 	//// Make an obstacle to cover the opponent's half of the field except for one robot diameter across the center line.
-	PolygonObstacle *sidePolygon = new PolygonObstacle;
-	_sideObstacle = ObstaclePtr(sidePolygon);
+	Polygon *sidePolygon = new Polygon;
+	_sideObstacle = std::shared_ptr<Shape>(sidePolygon);
 	float x = Field_Width / 2 + Field_Border;
 	const float y1 = Field_Length / 2;
 	const float y2 = Field_Length + Field_Border;
 	const float r = Field_CenterRadius;
-	sidePolygon->polygon.vertices.push_back(Geometry2d::Point(-x, y1));
-	sidePolygon->polygon.vertices.push_back(Geometry2d::Point(-r, y1));
-	sidePolygon->polygon.vertices.push_back(Geometry2d::Point(0, y1 + r));
-	sidePolygon->polygon.vertices.push_back(Geometry2d::Point(r, y1));
-	sidePolygon->polygon.vertices.push_back(Geometry2d::Point(x, y1));
-	sidePolygon->polygon.vertices.push_back(Geometry2d::Point(x, y2));
-	sidePolygon->polygon.vertices.push_back(Geometry2d::Point(-x, y2));
+	sidePolygon->vertices.push_back(Geometry2d::Point(-x, y1));
+	sidePolygon->vertices.push_back(Geometry2d::Point(-r, y1));
+	sidePolygon->vertices.push_back(Geometry2d::Point(0, y1 + r));
+	sidePolygon->vertices.push_back(Geometry2d::Point(r, y1));
+	sidePolygon->vertices.push_back(Geometry2d::Point(x, y1));
+	sidePolygon->vertices.push_back(Geometry2d::Point(x, y2));
+	sidePolygon->vertices.push_back(Geometry2d::Point(-x, y2));
 
 	float y = -Field_Border;
 	float deadspace = Field_Border;
 	x = Floor_Width/2.0f;
-	PolygonObstacle* floorObstacle = new PolygonObstacle;
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(-x, y));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(-x, y-1));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(x, y-1));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(x, y));
-	_nonFloor[0] = ObstaclePtr(floorObstacle);
+	Polygon* floorObstacle = new Polygon;
+	floorObstacle->vertices.push_back(Geometry2d::Point(-x, y));
+	floorObstacle->vertices.push_back(Geometry2d::Point(-x, y-1));
+	floorObstacle->vertices.push_back(Geometry2d::Point(x, y-1));
+	floorObstacle->vertices.push_back(Geometry2d::Point(x, y));
+	_nonFloor[0] = std::shared_ptr<Shape>(floorObstacle);
 
 	y = Field_Length + Field_Border;
-	floorObstacle = new PolygonObstacle;
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(-x, y));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(-x, y+1));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(x, y+1));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(x, y));
-	_nonFloor[1] = ObstaclePtr(floorObstacle);
+	floorObstacle = new Polygon;
+	floorObstacle->vertices.push_back(Geometry2d::Point(-x, y));
+	floorObstacle->vertices.push_back(Geometry2d::Point(-x, y+1));
+	floorObstacle->vertices.push_back(Geometry2d::Point(x, y+1));
+	floorObstacle->vertices.push_back(Geometry2d::Point(x, y));
+	_nonFloor[1] = std::shared_ptr<Shape>(floorObstacle);
 
 	y = Floor_Length;
-	floorObstacle = new PolygonObstacle;
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(-x, -deadspace));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(-x-1, -deadspace));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(-x-1, y));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(-x, y));
-	_nonFloor[2] = ObstaclePtr(floorObstacle);
+	floorObstacle = new Polygon;
+	floorObstacle->vertices.push_back(Geometry2d::Point(-x, -deadspace));
+	floorObstacle->vertices.push_back(Geometry2d::Point(-x-1, -deadspace));
+	floorObstacle->vertices.push_back(Geometry2d::Point(-x-1, y));
+	floorObstacle->vertices.push_back(Geometry2d::Point(-x, y));
+	_nonFloor[2] = std::shared_ptr<Shape>(floorObstacle);
 
-	floorObstacle = new PolygonObstacle;
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(x, -deadspace));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(x+1, -deadspace));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(x+1, y));
-	floorObstacle->polygon.vertices.push_back(Geometry2d::Point(x, y));
-	_nonFloor[3] = ObstaclePtr(floorObstacle);
+	floorObstacle = new Polygon;
+	floorObstacle->vertices.push_back(Geometry2d::Point(x, -deadspace));
+	floorObstacle->vertices.push_back(Geometry2d::Point(x+1, -deadspace));
+	floorObstacle->vertices.push_back(Geometry2d::Point(x+1, y));
+	floorObstacle->vertices.push_back(Geometry2d::Point(x, y));
+	_nonFloor[3] = std::shared_ptr<Shape>(floorObstacle);
 
-	PolygonObstacle* goalArea = new PolygonObstacle;
+	Polygon* goalArea = new Polygon;
 	const float halfFlat = Field_GoalFlat/2.0;
 	const float radius = Field_ArcRadius;
-	goalArea->polygon.vertices.push_back(Geometry2d::Point(-halfFlat, 0));
-	goalArea->polygon.vertices.push_back(Geometry2d::Point(-halfFlat, radius));
-	goalArea->polygon.vertices.push_back(Geometry2d::Point( halfFlat, radius));
-	goalArea->polygon.vertices.push_back(Geometry2d::Point( halfFlat, 0));
-	_goalArea.add(ObstaclePtr(goalArea));
-	_goalArea.add(ObstaclePtr(new CircleObstacle(Geometry2d::Point(-halfFlat, 0), radius)));
-	_goalArea.add(ObstaclePtr(new CircleObstacle(Geometry2d::Point(halfFlat, 0), radius)));
+	goalArea->vertices.push_back(Geometry2d::Point(-halfFlat, 0));
+	goalArea->vertices.push_back(Geometry2d::Point(-halfFlat, radius));
+	goalArea->vertices.push_back(Geometry2d::Point( halfFlat, radius));
+	goalArea->vertices.push_back(Geometry2d::Point( halfFlat, 0));
+	_goalArea.add(std::shared_ptr<Shape>(goalArea));
+	_goalArea.add(std::shared_ptr<Shape>(new Circle(Geometry2d::Point(-halfFlat, 0), radius)));
+	_goalArea.add(std::shared_ptr<Shape>(new Circle(Geometry2d::Point(halfFlat, 0), radius)));
 
-	_ourHalf = std::make_shared<PolygonObstacle>();
-	_ourHalf->polygon.vertices.push_back(Geometry2d::Point(-x, -Field_Border));
-	_ourHalf->polygon.vertices.push_back(Geometry2d::Point(-x, y1));
-	_ourHalf->polygon.vertices.push_back(Geometry2d::Point(x, y1));
-	_ourHalf->polygon.vertices.push_back(Geometry2d::Point(x, -Field_Border));
+	_ourHalf = std::make_shared<Polygon>();
+	_ourHalf->vertices.push_back(Geometry2d::Point(-x, -Field_Border));
+	_ourHalf->vertices.push_back(Geometry2d::Point(-x, y1));
+	_ourHalf->vertices.push_back(Geometry2d::Point(x, y1));
+	_ourHalf->vertices.push_back(Geometry2d::Point(x, -Field_Border));
 
-	_opponentHalf = std::make_shared<PolygonObstacle>();
-	_opponentHalf->polygon.vertices.push_back(Geometry2d::Point(-x, y1));
-	_opponentHalf->polygon.vertices.push_back(Geometry2d::Point(-x, y2));
-	_opponentHalf->polygon.vertices.push_back(Geometry2d::Point(x, y2));
-	_opponentHalf->polygon.vertices.push_back(Geometry2d::Point(x, y1));
+	_opponentHalf = std::make_shared<Polygon>();
+	_opponentHalf->vertices.push_back(Geometry2d::Point(-x, y1));
+	_opponentHalf->vertices.push_back(Geometry2d::Point(-x, y2));
+	_opponentHalf->vertices.push_back(Geometry2d::Point(x, y2));
+	_opponentHalf->vertices.push_back(Geometry2d::Point(x, y1));
 
 	_goalieID = -1;
+
+
+
+	//
+	//	setup python interpreter
+	//
+	try {
+        cout << "Initializing embedded python interpreter..." << endl;
+        
+        //  this tells python how to load the robocup module
+        //  it has to be done before Py_Initialize()
+        PyImport_AppendInittab("robocup", &PyInit_robocup);
+
+
+        //	we use Py_InitializeEx(0) instead of regular Py_Initialize() so that Ctrl-C kills soccer as expected
+        Py_InitializeEx(0);
+        PyEval_InitThreads(); {
+	        object main_module((handle<>(borrowed(PyImport_AddModule("__main__")))));
+	        _mainPyNamespace = main_module.attr("__dict__");
+
+	        object robocup_module((handle<>(PyImport_ImportModule("robocup"))));
+	        _mainPyNamespace["robocup"] = robocup_module;
+
+	        //	add gameplay directory to python import path (so import XXX) will look in the right directory
+	        handle<>ignored2((PyRun_String("import sys; sys.path.append('../soccer/gameplay')",
+	            Py_file_input,
+	            _mainPyNamespace.ptr(),
+	            _mainPyNamespace.ptr())));
+
+
+	        //	instantiate the root play
+	        handle<>ignored3((PyRun_String("import main; main.init()",
+	            Py_file_input,
+	            _mainPyNamespace.ptr(),
+	            _mainPyNamespace.ptr())));
+        } PyEval_SaveThread();
+    } catch (error_already_set) {
+        PyErr_Print();
+        throw new runtime_error("Unable to initialize embedded python interpreter");
+    } 
 }
 
-Gameplay::GameplayModule::~GameplayModule()
-{
-	removeGoalie();
+Gameplay::GameplayModule::~GameplayModule() {
+	Py_Finalize();
 }
 
-int Gameplay::GameplayModule::manualID() const
-{
-	return _state->logFrame->manual_id();
-}
-
-void Gameplay::GameplayModule::createGoalie()
-{
-	if (!_goalie)
-	{
-		printf("Creating goalie behavior.\n");
-  		_goalie = new Behaviors::Goalie(this);
-	}
-}
-
-void Gameplay::GameplayModule::removeGoalie()
-{
-	if (_goalie)
-	{
-		printf("Removing goalie behavior.\n");
-		delete _goalie;
-		_goalie = 0;
-	}
-}
-
-void Gameplay::GameplayModule::updatePlay() {
-	const bool verbose = false;
-
-	/// important scenarios:
-	///  - no current plays - must pick a new one
-	///  - no available plays - must do nothing
-	///  - current play is fine, must be run
-	///  - current play has ended, must select new and run
-	///  - current play is not applicable/failed, must kill, select new and run
-	///  - new goalie, select new play (may reselect current play, which much be assigned new robots)
-
-	/// Update play scores.
-	/// The GUI thread needs this for the Plays tab and we will use it later
-	/// to determine the new play.
-	BOOST_FOREACH(PlayFactory *factory, PlayFactory::factories())
-	{
-	factory->lastScore = factory->score(this);
-	}
-
-	if (	_playDone || 							/// New play if old one was complete
-			!_currentPlay ||						/// There is no current play
-			isinf(_currentPlayFactory->lastScore) || /// Current play doesn't apply anymore
-			!_currentPlayFactory->enabled			/// Current play was disabled
-	)
-	{
-		if (verbose) cout << "  Selecting a new play" << endl;
-		_playDone = false;
-
-		/// Find the next play
-		PlayFactory *bestPlay = 0;
-		/// Pick a new play
-		float bestScore = 0;
-
-		/// Find the best applicable play
-		BOOST_FOREACH(PlayFactory *factory, PlayFactory::factories())
-		{
-			if (factory->enabled)
-			{
-				float score = factory->lastScore;
-				if (!isinf(score) && (!bestPlay || score < bestScore))
-				{
-					bestScore = score;
-					bestPlay = factory;
-				}
-			}
+void Gameplay::GameplayModule::setupUI() {
+	PyGILState_STATE state = PyGILState_Ensure(); {
+		try {
+		    handle<>ignored3((PyRun_String("import ui.main; ui.main.setup()",
+		        Py_file_input,
+		        _mainPyNamespace.ptr(),
+		        _mainPyNamespace.ptr())));
+		} catch (error_already_set) {
+			PyErr_Print();
+			throw new runtime_error("Error trying to setup python-based UI");
 		}
-
-		/// Start the play if it's not current.
-		if (bestPlay)
-		{
-			if (bestPlay != _currentPlayFactory)
-			{
-				clearAvoidBallRadii();
-
-				_currentPlayFactory = bestPlay;
-				_currentPlay = std::shared_ptr<Play>(_currentPlayFactory->create(this));
-			}
-		} else {
-			/// No usable plays
-			_currentPlay.reset();
-			_currentPlayFactory = 0;
-		}
-	}
+	} PyGILState_Release(state);
 }
 
-void Gameplay::GameplayModule::clearAvoidBallRadii() {
-	BOOST_FOREACH(OurRobot* robot, _state->self)
-	{
-		if (robot) {
-			robot->resetAvoidBall();
+
+void Gameplay::GameplayModule::goalieID(int value)
+{
+	_goalieID = value;
+
+	//	pass this value to python
+	PyGILState_STATE state = PyGILState_Ensure(); {
+		try {
+			getRootPlay().attr("goalie_id") = _goalieID;
+		} catch (error_already_set) {
+			cout << "PYTHON ERROR!!!" << endl;
+			PyErr_Print();
+			cout << "END PYTHON ERROR" << endl;
+			throw new runtime_error("Error trying to set python goalie_id on root_play");
 		}
-	}
+	} PyGILState_Release(state);
 }
 
 /**
  * returns the group of obstacles for the field
  */
-ObstacleGroup Gameplay::GameplayModule::globalObstacles() const {
-	ObstacleGroup obstacles;
+Geometry2d::CompositeShape Gameplay::GameplayModule::globalObstacles() const {
+	Geometry2d::CompositeShape obstacles;
 	if (_state->gameState.stayOnSide())
 	{
 		obstacles.add(_sideObstacle);
@@ -227,12 +201,13 @@ ObstacleGroup Gameplay::GameplayModule::globalObstacles() const {
 	}
 
 	/// Add non floor obstacles
-	BOOST_FOREACH(const ObstaclePtr& ptr, _nonFloor)
+	BOOST_FOREACH(const std::shared_ptr<Shape>& ptr, _nonFloor)
 	{
 		obstacles.add(ptr);
 	}
 	return obstacles;
 }
+
 /**
  * runs the current play
  */
@@ -243,13 +218,16 @@ void Gameplay::GameplayModule::run()
 	bool verbose = false;
 	if (verbose) cout << "Starting GameplayModule::run()" << endl;
 
-	/// perform state variable updates on robots
-	/// Currently - only the timer for the kicker charger
+	_ballMatrix = Geometry2d::TransformMatrix::translate(_state->ball.pos);
+
+
+	///	prepare each bot for the next iteration by resetting temporary things
 	BOOST_FOREACH(OurRobot* robot, _state->self)
 	{
 		if (robot) {
-			robot->update();
-			robot->resetMotionCommand();
+			robot->resetAvoidBall();
+			robot->resetAvoidRobotRadii();
+			robot->resetForNextIteration();
 		}
 	}
 
@@ -263,74 +241,84 @@ void Gameplay::GameplayModule::run()
 		}
 	}
 
-	/// Assign the goalie and remove it from _playRobots
-	if (_goalie)
-	{
-		/// The Goalie behavior is responsible for only selecting a robot which is allowed by the rules
-		/// (no changing goalies at random times).
-		/// The goalie behavior has priority for choosing robots because it must obey this rule,
-		/// so the current play will be restarted in case the goalie stole one of its robots.
-		_goalie->assign(_playRobots, _goalieID);
-	}
-	
-#if 0
-	if (_playRobots.size() == 5)
-	{
-		printf("Too many robots on field: goalie %p\n", _goalie);
-		if (_goalie)
-		{
-			printf("  robot %p\n", _goalie->robot);
-			if (_goalie->robot)
-			{
-				printf("  shell %d\n", _goalie->robot->shell());
+	PyGILState_STATE state = PyGILState_Ensure(); {
+		try {
+			//	vector of shared pointers to pass to python
+			std::vector<OurRobot *> *botVector = new std::vector<OurRobot *>();
+			for (auto itr = _playRobots.begin(); itr != _playRobots.end(); itr++) {
+				OurRobot *ourBot = *itr;
+				//	don't attempt to drive the robot that's joystick-controlled
+				//	FIXME: exclude manual id robot
+				// if (ourBot->shell() != MANUAL_ID) {
+					botVector->push_back(ourBot);
+				// }
 			}
+			getMainModule().attr("set_our_robots")(botVector);
+
+			std::vector<OpponentRobot *> *theirBotVector = new std::vector<OpponentRobot *>();
+			for (auto itr = _state->opp.begin(); itr != _state->opp.end(); itr++) {
+				OpponentRobot *bot = *itr;
+				if (bot && bot->visible) {
+					theirBotVector->push_back(bot);
+				}
+			}
+			getMainModule().attr("set_their_robots")(theirBotVector);
+
+			getMainModule().attr("set_game_state")(_state->gameState);
+
+			getMainModule().attr("set_system_state")(&_state);
+
+			getMainModule().attr("set_ball")(_state->ball);
+		} catch (error_already_set) {
+			PyErr_Print();
+			throw new runtime_error("Error trying to pass robots and/or ball and/or game state to python");
 		}
-		
-		/// Make a new goalie
-		if (_goalie)
-		{
-			delete _goalie;
-		}
-///   		_goalie = new Behaviors::Goalie(this);
-	}
-#endif
 
-	_ballMatrix = Geometry2d::TransformMatrix::translate(_state->ball.pos);
-
-	if (verbose) cout << "  Updating play" << endl;
-	updatePlay();
-
-	/// Run the goalie
-	if (_goalie)
-	{
-		if (verbose) cout << "  Running goalie" << endl;
-		if (_goalie->robot && _goalie->robot->visible)
-		{
-			_goalie->run();
-		}
-	}
-
-	/// Run the current play
-	if (_currentPlay)
-	{
+		/// Run the current play
 		if (verbose) cout << "  Running play" << endl;
-		_playDone = !_currentPlay->run();
-	}
+		try {
+			/*
+			 We wrap this in a try catch block because main.run() should NEVER throw an exception.
+			 There are exception handlers setup on the python side of the setup - anything not handled
+			 there should crash the program.
+
+			 The part where we get the behavior tree description is wrapped in its own try/catch
+			 because if it fails, we don't want to crash the program.
+			 */
+
+			handle<>ignored3((PyRun_String("main.run()",
+		        Py_file_input,
+		        _mainPyNamespace.ptr(),
+		        _mainPyNamespace.ptr())));
+
+			try {
+				//	record the state of our behavior tree
+				std::string bhvrTreeDesc = extract<std::string>(getRootPlay().attr("__str__")());
+				_state->logFrame->set_behavior_tree(bhvrTreeDesc);
+			}
+			catch (error_already_set) {
+	        	PyErr_Print();
+			}
+		} catch (error_already_set) {
+	        PyErr_Print();
+	        throw new runtime_error("Error trying to run root play");
+	    }
+	} PyGILState_Release(state);
 
 	/// determine global obstacles - field requirements
 	/// Two versions - one set with goal area, another without for goalie
-	ObstacleGroup global_obstacles = globalObstacles();
-	ObstacleGroup obstacles_with_goal = global_obstacles;
+	Geometry2d::CompositeShape global_obstacles = globalObstacles();
+	Geometry2d::CompositeShape obstacles_with_goal = global_obstacles;
 	obstacles_with_goal.add(_goalArea);
 
 	/// execute motion planning for each robot
 	BOOST_FOREACH(OurRobot* r, _state->self) {
 		if (r && r->visible) {
 			/// set obstacles for the robots
-			if (_goalie && _goalie->robot && r->shell() == _goalie->robot->shell())
-				r->execute(global_obstacles); /// just for goalie
+			if (r->shell() == _goalieID)
+				r->replanIfNeeded(global_obstacles); /// just for goalie
 			else
-				r->execute(obstacles_with_goal); /// all other robots
+				r->replanIfNeeded(obstacles_with_goal); /// all other robots
 		}
 	}
 
@@ -340,12 +328,6 @@ void Gameplay::GameplayModule::run()
 		_state->drawCircle(_state->ball.pos, Field_CenterRadius, Qt::black, "Rules");
 	}
 
-	if (_currentPlay)
-	{
-		_playName = _currentPlay->name();
-	} else {
-		_playName = QString();
-	}
 	if (verbose) cout << "Finishing GameplayModule::run()" << endl;
 
 	if(_state->gameState.ourScore > _our_score_last_frame)
@@ -356,4 +338,15 @@ void Gameplay::GameplayModule::run()
 		}
 	}
 	_our_score_last_frame = _state->gameState.ourScore;
+}
+
+
+#pragma mark python
+
+boost::python::object Gameplay::GameplayModule::getRootPlay() {
+	return getMainModule().attr("root_play")();
+}
+
+boost::python::object Gameplay::GameplayModule::getMainModule() {
+	return _mainPyNamespace["main"];
 }

@@ -13,25 +13,18 @@
 #include <stdexcept>
 #include <boost/foreach.hpp>
 #include <QString>
+#include <cmath>
 
 using namespace std;
 using namespace Geometry2d;
 
-/** Constant for timestamp to seconds */
-const float intTimeStampToFloat = 1000000.0f;
-
-///The threshold necessary to change paths tuning required
-///const float path_threshold = 2 * Robot_Diameter; // previous value
-const float path_threshold = 1.0;
-
 /** thresholds for avoidance of opponents - either a normal (large) or an approach (small)*/
 const float Opp_Avoid_Small = Robot_Radius - 0.03;
-/** thresholds for avoidance of opponents - either a normal (large) or an approach (small)*/
-const float Opp_Avoid_Large = Robot_Radius - 0.01;
 /** threshold for avoiding the ball*/
 const float Ball_Avoid_Small = 2.0 * Ball_Radius;
 /**
- * I think this is verbose comments in the simulator
+ * When verbose is true, a lot of extra debug info is printed
+ * to the console about path planning, etc
  */
 const bool verbose = false;
 
@@ -56,43 +49,54 @@ Robot::Robot(unsigned int shell, bool self)
 Robot::~Robot()
 {
 	delete _filter;
-	_filter = 0;
+	_filter = nullptr;
 }
 
 
 #pragma mark OurRobot
 
+REGISTER_CONFIGURABLE(OurRobot)
+
+ConfigDouble *OurRobot::_selfAvoidRadius;
+ConfigDouble *OurRobot::_oppAvoidRadius;
+ConfigDouble *OurRobot::_oppGoalieAvoidRadius;
+
+void OurRobot::createConfiguration(Configuration *cfg) {
+	_selfAvoidRadius = new ConfigDouble(cfg, "PathPlanner/selfAvoidRadius", Robot_Radius);
+	_oppAvoidRadius = new ConfigDouble(cfg, "PathPlanner/oppAvoidRadius", Robot_Radius - 0.01);
+	_oppGoalieAvoidRadius = new ConfigDouble(cfg, "PathPlanner/oppGoalieAvoidRadius", Robot_Radius + 0.05);
+}
+
 OurRobot::OurRobot(int shell, SystemState *state):
 	Robot(shell, true),
-	_state(state)
+	_state(state),
+	_pathChangeHistory(PathChangeHistoryBufferSize)
 {
-	resetAvoidBall();
-	_delayed_goal = boost::none;
-	_usesPathPlanning = true;
-	cmd_w = 0;
-	_lastChargedTime = 0;
-	_motionControl = new MotionControl(this);
+	_cmdText = new std::stringstream();
 
-	_planner = new Planning::RRTPlanner();
+	resetAvoidBall();
+	_lastChargedTime = 0;
 	_lastKickerStatus = 0;
 	_lastKickTime = 0;
 
-	for (size_t i = 0; i < Num_Shells; ++i)
-	{
-		// TODO move thresholds elsewhere
-		_self_avoid_mask[i] = (i != (size_t) shell) ? Robot_Radius : -1.0;
-		_opp_avoid_mask[i] = Opp_Avoid_Large;
-	}
+	_motionControl = new MotionControl(this);
 
+	_planner = new Planning::RRTPlanner();
 	_planner->maxIterations(250);
+
+	resetAvoidRobotRadii();
+
+	_clearCmdText();
 }
+
 /**
  * ourrobot deconstructor, deletes motion control and planner
  */
 OurRobot::~OurRobot()
 {
-	delete _motionControl;
-	delete _planner;
+	if (_motionControl) delete _motionControl;
+	if (_planner) delete _planner;
+	delete _cmdText;
 }
 
 void OurRobot::addStatusText()
@@ -186,92 +190,102 @@ void OurRobot::avoidOpponents(bool enable) {
 			a = -1.0;
 }
 
-void OurRobot::resetMotionCommand()
-{
-	if (verbose && visible) cout << "in OurRobot::resetMotionCommand()" << endl;
+std::string OurRobot::getCmdText() const {
+	return _cmdText->str();
+}
+
+void OurRobot::_clearCmdText() {
+	_cmdText->str("");
+	_cmdText->clear();
+}
+
+void OurRobot::resetForNextIteration() {
+	if (verbose && visible) cout << "in OurRobot::resetForNextIteration()" << std::endl;
 	robotText.clear();
 
-	// FIXME: these are moved to assignment to allow for commands from the previous frame to
-	// still be in effect.  They are automatically reset at assignment by assignNearest()
-	//	willKick = false;
-	//	avoidBall = false;
+	_didSetPathThisIteration = false;
+
+	_clearCmdText();
 
 	radioTx.Clear();
 	radioTx.set_robot_id(shell());
 	radioTx.set_accel(10);
 	radioTx.set_decel(10);
 
-	cmd = MotionCommand();
-	_delayed_goal = boost::none;
+	if (charged()) {
+		_lastChargedTime = timestamp();
+	}
 
 	_local_obstacles.clear();
+	resetMotionConstraints();
+	_unkick();
 }
 
-void OurRobot::stop()
-{
-	_delayed_goal = boost::none;
+void OurRobot::resetMotionConstraints() {
+	_motionConstraints = MotionConstraints();
 }
 
-void OurRobot::move(Geometry2d::Point goal, bool stopAtEnd)
+void OurRobot::stop() {
+	resetMotionConstraints();
+
+	*_cmdText << "stop()\n";
+}
+
+void OurRobot::move(const Geometry2d::Point &goal, float endSpeed)
 {
 	if (!visible)
 		return;
 
 	// sets flags for future movement
-	if (verbose) cout << " in OurRobot::move(goal): adding a goal (" << goal.x << ", " << goal.y << ")" << endl;
-	addText(QString("move:(%1, %2)").arg(goal.x).arg(goal.y));
-	_delayed_goal = goal;
-	_usesPathPlanning = true;
-}
+	if (verbose) cout << " in OurRobot::move(goal): adding a goal (" << goal.x << ", " << goal.y << ")" << std::endl;
+	
+	_motionConstraints.targetPos = goal;
+	_motionConstraints.endSpeed = endSpeed;
 
-void OurRobot::move(const vector<Geometry2d::Point>& path, bool stopAtEnd)
-{
-	_state->drawLine(path.back(), pos);
+	//	reset conflicting motion commands
+	_motionConstraints.pivotTarget = boost::none;
+	_motionConstraints.targetWorldVel = boost::none;
 
-	// copy path from input
-	_path.clear();
-	_path.points = path;
+	// //	only invalidate path if move() is being called with a new goal or one wasn't set previously
+	// if (!_motionConstraints.targetPos || !_motionConstraints.targetPos->nearPoint(goal, 0.02)) {
+	// 	addText("Invalidated old path");
+		
+	// 	if (_motionConstraints.targetPos) {
+	// 		addText(QString("Old goal: (%1, %2)").arg(goal.x, goal.y));
+	// 		addText(QString("New goal: (%1, %2)").arg(_motionConstraints.targetPos->x, _motionConstraints.targetPos->y));
+	// 	} else {
+	// 		addText("Old goal was null");
+	// 	}
+		
+	// 	_motionConstraints.targetPos = goal;
+	// 	_pathInvalidated = true;
+	// }
 
-	// ensure RRT not used
-	_delayed_goal = boost::none;
-	_usesPathPlanning = false;
-
-	// convert to motion command
-	cmd.target = MotionTarget();
-	cmd.target->pos = findGoalOnPath(pos, _path);
-}
-
-void OurRobot::pivot(double w, double radius)
-{
-	bodyVelocity(Point(0, -radius * w));
-	angularVelocity(w);
-}
-
-void OurRobot::bodyVelocity(const Geometry2d::Point& v)
-{
-	// ensure RRT not used
-	_delayed_goal = boost::none;
-	_usesPathPlanning = false;
-
-	cmd.target = boost::none;
-	cmd.worldVel = boost::none;
-	cmd.bodyVel = v;
+	*_cmdText << "move(" << goal.x << ", " << goal.y << ")\n";
+	if (endSpeed != 0) {
+		*_cmdText << "setEndSpeed(" << endSpeed << ")\n";
+	}
 }
 
 void OurRobot::worldVelocity(const Geometry2d::Point& v)
 {
-	// ensure RRT not used
-	_delayed_goal = boost::none;
-	_usesPathPlanning = false;
+	_motionConstraints.targetPos = boost::none;
+	_motionConstraints.targetWorldVel = v;
 
-	cmd.target = boost::none;
-	cmd.worldVel = v;
-	cmd.bodyVel = boost::none;
+	_path.reset();
+
+	*_cmdText << "worldVel(" << v.x << ", " << v.y << ")\n";
 }
 
-void OurRobot::angularVelocity(double w)
-{
-	cmd.angularVelocity = w;
+void OurRobot::pivot(const Geometry2d::Point &pivotTarget) {
+	_motionConstraints.pivotTarget = pivotTarget;
+
+	//	reset other conflicting motion commands
+	_motionConstraints.targetPos = boost::none;
+	_motionConstraints.targetWorldVel = boost::none;
+	_motionConstraints.faceTarget = boost::none;
+
+	*_cmdText << "pivot(" << pivotTarget.x << ", " << pivotTarget.y << ")\n";
 }
 
 Geometry2d::Point OurRobot::pointInRobotSpace(const Geometry2d::Point& pt) const {
@@ -294,67 +308,110 @@ bool OurRobot::behindBall(const Geometry2d::Point& ballPos) const {
 	return ballTransformed.x < -Robot_Radius;
 }
 
-void OurRobot::setVScale(float scale) {
-	cmd.vScale = scale;
-}
-
-void OurRobot::setWScale(float scale) {
-	cmd.wScale = scale;
-}
-
 float OurRobot::kickTimer() const {
-	return (charged()) ? 0.0 : intTimeStampToFloat * (float) (timestamp() - _lastChargedTime);
+	return (charged()) ? 0.0 : (float)(timestamp() - _lastChargedTime) * TimestampToSecs;
 }
 
-void OurRobot::update() {
-	if (charged())
-	{
-		_lastChargedTime = timestamp();
-	}
-}
-
-void OurRobot::dribble(int8_t speed)
+void OurRobot::dribble(uint8_t speed)
 {
-	radioTx.set_dribbler(speed);
+	uint8_t scaled = *config->dribbler.multiplier * speed;
+	radioTx.set_dribbler(scaled);
+
+	*_cmdText << "dribble(" << (float)speed << ")\n";
 }
 
-void OurRobot::face(Geometry2d::Point pt)
+void OurRobot::face(const Geometry2d::Point &pt)
 {
-	cmd.face = FaceTarget();
-	cmd.face->pos = pt;
+	_motionConstraints.faceTarget = pt;
+
+	//	reset conflicting motion commands
+	_motionConstraints.pivotTarget = boost::none;
+
+	*_cmdText << "face(" << pt.x << ", " << pt.y << ")\n";
 }
 
 void OurRobot::faceNone()
 {
-	cmd.face = boost::none;
+	_motionConstraints.faceTarget = boost::none;
+
+	*_cmdText << "faceNone()\n";
 }
 
 void OurRobot::kick(uint8_t strength)
 {
+	_kick(strength);
+
+	*_cmdText << "kick(" << (float)strength << ")\n";
+}
+
+void OurRobot::chip(uint8_t strength)
+{
+	_chip(strength);
+
+	*_cmdText << "chip(" << (float)strength << ")\n";
+}
+
+void OurRobot::_kick(uint8_t strength) {
 	uint8_t max = *config->kicker.maxKick;
 	radioTx.set_kick(strength > max ? max : strength);
 	radioTx.set_use_chipper(false);
 }
 
-void OurRobot::chip(uint8_t strength)
-{
+void OurRobot::_chip(uint8_t strength) {
 	uint8_t max = *config->kicker.maxChip;
+	// TODO make sure we're not about to chip over the middle line.
+	Segment robot_face_line = Segment(pos, pos + 10*Point::direction(angle * M_PI / 180.));
+	Segment mid_field_line = Segment(Point(-Field_Width/2,Field_Length/2), Point(Field_Width/2,Field_Length/2));
+	Point intersection;
+	if(robot_face_line.intersects(mid_field_line, &intersection))
+	{
+		float dist = intersection.distTo(pos);
+		int power = min(strength, chipPowerForDistance(dist));
+		if(power == 0)
+			_kick(strength);
+		else
+			strength = power;
+	}
 	radioTx.set_kick(strength > max ? max : strength);
 	radioTx.set_use_chipper(true);
 }
 
-void OurRobot::immediate(bool im)
+void OurRobot::_unkick() {
+	_kick(0);
+	_chip(0);
+	radioTx.set_use_chipper(false);
+	radioTx.set_kick_immediate(false);
+}
+
+void OurRobot::unkick()
+{
+	_unkick();
+
+	*_cmdText << "unkick()\n";
+}
+
+void OurRobot::kickImmediately(bool im)
 {
 	radioTx.set_kick_immediate(im);
 }
 
+
+#pragma mark Robot Avoidance
+
+void OurRobot::resetAvoidRobotRadii() {
+	for (size_t i = 0; i < Num_Shells; ++i) {
+		_self_avoid_mask[i] = (i != (size_t) shell()) ? *_selfAvoidRadius : -1.0;
+		_opp_avoid_mask[i] = (i == state()->gameState.TheirInfo.goalie) ? *_oppGoalieAvoidRadius : *_oppAvoidRadius;
+	}
+}
+
 void OurRobot::approachAllOpponents(bool enable) {
 	BOOST_FOREACH(float &ar, _opp_avoid_mask)
-		ar = (enable) ?  Opp_Avoid_Small : Opp_Avoid_Large;
+		ar = (enable) ?  Opp_Avoid_Small : *_oppAvoidRadius;
 }
 void OurRobot::avoidAllOpponents(bool enable) {
 	BOOST_FOREACH(float &ar, _opp_avoid_mask)
-		ar = (enable) ?  -1.0 : Opp_Avoid_Large;
+		ar = (enable) ?  -1.0 : *_oppAvoidRadius;
 }
 
 bool OurRobot::avoidOpponent(unsigned shell_id) const {
@@ -371,7 +428,7 @@ float OurRobot::avoidOpponentRadius(unsigned shell_id) const {
 
 void OurRobot::avoidOpponent(unsigned shell_id, bool enable_avoid) {
 	if (enable_avoid)
-		_opp_avoid_mask[shell_id] = Opp_Avoid_Large;
+		_opp_avoid_mask[shell_id] = *_oppAvoidRadius;
 	else
 		_opp_avoid_mask[shell_id] = -1.0;
 }
@@ -380,7 +437,7 @@ void OurRobot::approachOpponent(unsigned shell_id, bool enable_approach) {
 	if (enable_approach)
 		_opp_avoid_mask[shell_id] = Opp_Avoid_Small;
 	else
-		_opp_avoid_mask[shell_id] = Opp_Avoid_Large;
+		_opp_avoid_mask[shell_id] = *_oppAvoidRadius;
 }
 
 void OurRobot::avoidOpponentRadius(unsigned shell_id, float radius) {
@@ -414,15 +471,26 @@ float OurRobot::avoidTeammateRadius(unsigned shell_id) const {
 	return _self_avoid_mask[shell_id];
 }
 
+void OurRobot::shieldFromTeammates(float radius) {
+	for (OurRobot *teammate : state()->self) {
+		if (teammate) {
+			teammate->avoidTeammateRadius(shell(), radius);
+		}
+	}
+}
+
+
 
 #pragma mark Ball Avoidance
 
 void OurRobot::disableAvoidBall() {
-	_avoidBallRadius = -1.0;
+	avoidBallRadius(-1);
 }
 
 void OurRobot::avoidBallRadius(float radius) {
 	_avoidBallRadius = radius;
+
+	*_cmdText << "avoidBall(" << radius << ")\n";
 }
 
 float OurRobot::avoidBallRadius() const {
@@ -433,176 +501,83 @@ void OurRobot::resetAvoidBall() {
 	avoidBallRadius(Ball_Avoid_Small);
 }
 
-ObstaclePtr OurRobot::createBallObstacle() const {
+std::shared_ptr<Geometry2d::Shape> OurRobot::createBallObstacle() const {
 	// if game is stopped, large obstacle regardless of flags
 	if (_state->gameState.state != GameState::Playing && !(_state->gameState.ourRestart || _state->gameState.theirPenalty()))
 	{
-		return ObstaclePtr(new CircleObstacle(_state->ball.pos, Field_CenterRadius));
+		return std::shared_ptr<Geometry2d::Shape>(new Circle(_state->ball.pos, Field_CenterRadius));
 	}
 
 	// create an obstacle if necessary
 	if (_avoidBallRadius > 0.0) {
-		return ObstaclePtr(new CircleObstacle(_state->ball.pos, _avoidBallRadius));
+		return std::shared_ptr<Geometry2d::Shape>(new Circle(_state->ball.pos, _avoidBallRadius));
 	} else {
-		return ObstaclePtr();
+		return std::shared_ptr<Geometry2d::Shape>();
 	}
 }
 
 
 #pragma mark Motion
 
-Geometry2d::Point OurRobot::findGoalOnPath(const Geometry2d::Point& pose,
-	const Planning::Path& path,	const ObstacleGroup& obstacles) {
-	const bool blend_verbose = false;
+void OurRobot::setPath(Planning::Path path) {
+	_didSetPathThisIteration = true;
 
-	// empty path case - leave robot stationary
-	if (path.empty())
-		return pose;
+	_path = path;
+	_pathInvalidated = false;
+	_pathStartTime = timestamp();
 
-	// find closest point on path to pose
-	float max = path.points[0].distTo(pose);
-	unsigned int ip = 0;
-	for (unsigned i=0; i<path.points.size(); i++) {
-		if (path.points[i].distTo(pose) < max) {
-			max = path.points[i].distTo(pose);
-			ip = i;
-		}
-	}
+	_path->endSpeed = _motionConstraints.endSpeed;
+	_path->maxSpeed = _motionConstraints.maxSpeed;
+	_path->maxAcceleration = _motionConstraints.maxAcceleration;
 
-	if (blend_verbose) addText(QString("cur pt %1=(%2,%3)").arg(ip).arg(path.points[ip].x).arg(path.points[ip].y));
+	//	start velocity is the speed we're going in the direction of the target start velocity
+	Geometry2d::Point posOut, velOut;
+	_path->startSpeed = 0;
+	_path->evaluate(0.01, posOut, velOut);
 
-	// go to nearest point if only point or closest point is the goal
-	if (path.size() == 1) {
-		if (blend_verbose) addText(QString("blend:simple_path"));
-		return path.points[0];
-	}
-
-	// can't mix, just go to endpoint
-	if (path.size() == 2) {
-		if (blend_verbose) addText(QString("blend:size2"));
-		return path.points[1];
-	}
-
-	// FIXME: does not blend the last segment
-	// All other cases: proportionally blend the next two points together for a smoother
-	// path, so long as it is still viable
-
-	if (blend_verbose) addText(QString("blend:segments=%1").arg(path.points.size()-1));
-
-	// pull out relevant points
-	Point p0 = pos;
-	Point p1;
-	Point p2;
-
-	if (path.size() > ip+2) {
-		p1 = path.points[ip+1];
-		p2 = path.points[ip+2];
-	} else if (path.size() > ip+1) {
-		p1 = path.points[ip];
-		p2 = path.points[ip+1];
-	} else {
-		p1 = path.points[ip-1];
-		p2 = path.points[ip];
-	}
-
-	Geometry2d::Segment target_seg(p1, p2);
-
-	if (blend_verbose) addText(QString("pos=(%1,%2)").arg(pos.x,5).arg(pos.y,5));
-	if (blend_verbose) addText(QString("path[0]=(%1,%2)").arg(path.points[0].x).arg(path.points[0].y));
-	if (blend_verbose) addText(QString("p1=(%1,%2)").arg(p1.x,5).arg(p1.y,5));
-	if (blend_verbose) addText(QString("p2=(%1,%2)").arg(p2.x,5).arg(p2.y,5));
-
-	// final endpoint handling
-	if (target_seg.nearPointPerp(p0, 0.02) && p0.nearPoint(p2, 0.03)) {
-		if (2 == path.size()-1) {
-			if (blend_verbose) addText(QString("blend:at_end"));
-			return p2;
-		} else {
-			// reset this segment to next one
-			if (blend_verbose) addText(QString("blend:reset_segment"));
-			Point temp(p1);
-			p1 = p2;
-			p2 = temp;
-			target_seg = Geometry2d::Segment(p1, p2);
-		}
-	}
-
-	float dist1 = p0.distTo(p1), dist2 = p1.distTo(p2);
-	if (blend_verbose) addText(QString("blend:d1=%1,d2=%2").arg(dist1).arg(dist2));
-
-	// endpoint handling
-	if (dist1 < 0.02) {
-		if (blend_verbose) addText(QString("blend:dist1small=%1").arg(dist1));
-		return p2; /// just go to next point
-	}
-
-	// short segment handling
-	if (p1.distTo(p2) < 0.05) {
-		if (blend_verbose) addText(QString("blend:dist2small=%1").arg(dist2));
-		return p2; /// just go to next point
-	}
-
-	// close to segment - go to end of segment
-	if (target_seg.nearPoint(p0, 0.03)) {
-		if (blend_verbose) addText(QString("blend:closeToSegment"));
-		return p2;
-	}
-
-	// mix the next point between the first and second point
-	// if we are far away from p1, want scale to be closer to p1
-	// if we are close to p1, want scale to be closer to p2
-	float scale = 1 - clamp(dist1/dist2, 0.0f, 1.0f);
-	Geometry2d::Point targetPos = p1 + (p2-p1)*scale;
-	if (blend_verbose) {
-		addText(QString("blend:scale=%1").arg(scale));
-		addText(QString("blend:dist1=%1").arg(dist1));
-		addText(QString("blend:dist2=%1").arg(dist2));
-	}
-
-	// check for collisions on blended path
-	Geometry2d::Segment shortcut(p0, targetPos);
-
-	Geometry2d::Point result = p1;
-	if (!obstacles.hit(shortcut)) {
-		if (blend_verbose) addText(QString("blend:shortcut_succeed"));
-		result = targetPos;
-	} else if (result.nearPoint(pose, 0.05)) {
-		if (blend_verbose) addText(QString("blend:shortcut_failed"));
-		result = result + (result-pose).normalized() * 0.10;
-	}
-
-	if (blend_verbose) addText(QString("point (%1, %2)").arg(result.x).arg(result.y));
-
-	return result;
+	//	we don't let the start speed go below zero
+	//	in reality we should allow for it, but motion control isn't there yet and negative values cause more error
+	float startSpeed = vel.dot(velOut.normalized());
+	_path->startSpeed = max<float>(startSpeed, 0);
 }
 
-void OurRobot::execute(const ObstacleGroup& global_obstacles) {
-	const bool enable_slice = false;
+int OurRobot::consecutivePathChangeCount() const {
+	int count = 0;
+	for (auto itr = _pathChangeHistory.begin(); itr != _pathChangeHistory.end(); itr++) {
+		if (*itr) {
+			count++;
+		} else {
+			break;
+		}
+	}
 
-	// halt case - same as stopped
-	if (_state->gameState.state == GameState::Halt) {
+	return count > 0 ? count - 1 : 0;
+}
+
+void OurRobot::replanIfNeeded(const Geometry2d::CompositeShape& global_obstacles) {
+	if (!_motionConstraints.targetPos) {
+		_path = boost::none;
 		return;
 	}
 
-	// if motion command complete or we are using a different planner - we're done
-	if (!_usesPathPlanning) {
-		if (verbose) cout << "in OurRobot::execute() for robot [" << shell() << "]: not using path planner" << endl;
+	if (_state->gameState.state == GameState::Halt || !_motionConstraints.targetPos) {
+		//	clear our history of path change times
+		_pathChangeHistory.clear();
+
 		return;
 	}
 
-	cmd.target = MotionTarget();
-	
 	// create and visualize obstacles
-	ObstacleGroup full_obstacles(_local_obstacles);
-	ObstacleGroup
+	Geometry2d::CompositeShape full_obstacles(_local_obstacles);
+	Geometry2d::CompositeShape
 		self_obs = createRobotObstacles(_state->self, _self_avoid_mask),
 		opp_obs = createRobotObstacles(_state->opp, _opp_avoid_mask);
-	_state->drawObstacles(self_obs, Qt::gray, QString("self_obstacles_%1").arg(shell()));
-	_state->drawObstacles(opp_obs, Qt::gray, QString("opp_obstacles_%1").arg(shell()));
+	_state->drawCompositeShape(self_obs, Qt::gray, QString("self_obstacles_%1").arg(shell()));
+	_state->drawCompositeShape(opp_obs, Qt::gray, QString("opp_obstacles_%1").arg(shell()));
 	if (_state->ball.valid)
 	{
-		ObstaclePtr ball_obs = createBallObstacle();
-		_state->drawObstacle(ball_obs, Qt::gray, QString("ball_obstacles_%1").arg(shell()));
+		std::shared_ptr<Geometry2d::Shape> ball_obs = createBallObstacle();
+		_state->drawShape(ball_obs, Qt::gray, QString("ball_obstacles_%1").arg(shell()));
 		full_obstacles.add(ball_obs);
 	}
 	full_obstacles.add(self_obs);
@@ -610,59 +585,105 @@ void OurRobot::execute(const ObstacleGroup& global_obstacles) {
 	full_obstacles.add(global_obstacles);
 
 	// if no goal command robot to stop in place
-	if (!_delayed_goal) {
-		if (verbose) cout << "in OurRobot::execute() for robot [" << shell() << "]: stopped" << endl;
-		addText(QString("execute: no goal"));
-		_path = Planning::Path(pos);
-		cmd.target->pos = pos;
-		_state->drawPath(_path);
+	if (!_motionConstraints.targetPos) {
+		if (verbose) cout << "in OurRobot::replanIfNeeded() for robot [" << shell() << "]: stopped" << std::endl;
+		addText(QString("replan: no goal"));
+		setPath(Planning::Path(pos));
+		_state->drawPath(*_path);
 		return;
 	}
 
-	// create default path for comparison - switch if available
-	Planning::Path straight_line(pos, *_delayed_goal);
-	Geometry2d::Segment straight_seg(pos, *_delayed_goal);
-	if (!full_obstacles.hit(straight_seg)) {
-		if (verbose) cout << "in OurRobot::execute() for robot [" << shell() << "]: using straight line goal" << endl;
-		addText(QString("execute: straight_line"));
-		_path = straight_line;
-		cmd.target->pos = *_delayed_goal;
-		_state->drawPath(straight_line, Qt::red);
-		return;
+
+	Geometry2d::Point dest = *_motionConstraints.targetPos;
+
+	// //	if this number of microseconds passes since our last path plan, we automatically replan
+	// const uint64_t kPathExpirationInterval = 1.5 * SecsToTimestamp;
+	// if ((timestamp() - _pathStartTime) > kPathExpirationInterval) {
+	// 	_pathInvalidated = true;
+	// }
+
+	if (!_path) {
+		_pathInvalidated = true;
 	}
 
-	// create new a new path for comparision
-	Planning::Path rrt_path;
-	_planner->run(pos, angle, vel, *_delayed_goal, &full_obstacles, rrt_path);
+
+	Planning::Path newlyPlannedPath;
+	_planner->run(pos, angle, vel, *_motionConstraints.targetPos, &full_obstacles, newlyPlannedPath);
+
+	//	invalidate path if it hits obstacles
+	//	TODO: it would be better to compare WHICH obstacles the old and new paths hit rather than just looking at IF they hit obstacles
+	if (_path && _path->hit(full_obstacles) && !newlyPlannedPath.hit(full_obstacles)) {
+		_pathInvalidated = true;
+	}
+
+	//  invalidate path if current position is more than 15cm from the planned point
+	if (_path) {
+		float maxDist = 0.30;
+		Point targetPathPos;
+		Point targetVel;
+		float timeIntoPath = ((float)(timestamp() - _pathStartTime)) * TimestampToSecs;
+		_path->evaluate(timeIntoPath, targetPathPos, targetVel);
+		float pathError = (targetPathPos - pos).mag();
+		if (pathError > maxDist) {
+			_pathInvalidated = true;
+		}
+	}
+	
+	
+	//	if the destination of the current path is greater than X m away from the target destination,
+	//	we invalidate the path.  this situation could arise if during a previous planning, the target point
+	//	was blocked by an obstacle
+	if (_path && (_path->points.back() - dest).mag() > 0.025) {
+		_pathInvalidated = true;
+	}
 
 
-	// check if goal is close to previous goal to reuse path
-	Geometry2d::Point::Optional dest = _path.destination();
-	if (dest && _delayed_goal->nearPoint(*dest, 0.1)) {
-		Planning::Path sliced_path;
-		_path.startFrom(pos, sliced_path);
-		if (enable_slice && !sliced_path.hit(full_obstacles)) {
-			addText(QString("execute: slicing path"));
-			cmd.target->pos = findGoalOnPath(pos, sliced_path, full_obstacles);
-			_state->drawPath(sliced_path, Qt::cyan);
-			Geometry2d::Point offset(0.01, 0.01);
-			_state->drawLine(pos + offset, cmd.target->pos + offset, Qt::black);
-			return;
-		} else if (!_path.hit(full_obstacles)) {
-			addText(QString("execute: reusing path"));
-			cmd.target->pos = findGoalOnPath(pos, _path, full_obstacles);
-			_state->drawPath(_path, Qt::yellow);
-			_state->drawLine(pos, cmd.target->pos, Qt::black);
-			return;
+	//	try a straight path EVERY time
+	if (_path && _path->points.size() > 2) {
+		//	try a straight line path first
+		Geometry2d::Segment straight_seg(pos, *_motionConstraints.targetPos);
+		if (!full_obstacles.hit(straight_seg)) {
+			addText(QString("planner: pre-emptive straight_line"));
+			Planning::Path straightLine(pos, *_motionConstraints.targetPos);
+			setPath(straightLine);
+			_pathInvalidated = false;
 		}
 	}
 
-	// use the newly generated path
-	if (verbose) cout << "in OurRobot::execute() for robot [" << shell() << "]: using new RRT path" << endl;
-	_path = rrt_path;
-	_state->drawPath(rrt_path, Qt::magenta);
-	addText(QString("execute: RRT path %1").arg(full_obstacles.size()));
-	cmd.target->pos = findGoalOnPath(pos, _path, full_obstacles);
+	
+
+
+	// check if goal is close to previous goal to reuse path
+	if (!_pathInvalidated) {
+		addText("Reusing path");
+		// for (auto itr : _path->points) {
+		// 	cout << "\t(" << itr.x << ", " << itr.y << ")" << endl;
+		// }
+	} else {
+		// use the newly generated path
+		if (verbose) cout << "in OurRobot::replanIfNeeded() for robot [" << shell() << "]: using new RRT path" << std::endl;
+		
+		//	try a straight line path first
+		Geometry2d::Segment straight_seg(pos, *_motionConstraints.targetPos);
+		if (!full_obstacles.hit(straight_seg)) {
+			addText(QString("planner: straight_line"));
+			Planning::Path straightLine(pos, *_motionConstraints.targetPos);
+			setPath(straightLine);
+		} else {
+			//	rrt-planned path
+			setPath(newlyPlannedPath);
+		}
+	}
+
+
+	_path->maxSpeed = _motionConstraints.maxSpeed;
+	_path->endSpeed = _motionConstraints.endSpeed;
+	_path->maxAcceleration = _motionConstraints.maxAcceleration;
+
+	_state->drawPath(*_path, Qt::magenta);
+
+	_pathChangeHistory.push_back(_didSetPathThisIteration);
+
 	return;
 }
 
@@ -737,7 +758,7 @@ Packet::HardwareVersion OurRobot::hardwareVersion() const
 
 boost::optional<Eigen::Quaternionf> OurRobot::quaternion() const
 {
-	if (_radioRx.has_quaternion() && rxIsFresh(50000))
+	if (_radioRx.has_quaternion() && rxIsFresh(0.05 * SecsToTimestamp))
 	{
 		return Eigen::Quaternionf(
 			_radioRx.quaternion().q0() / 16384.0,
@@ -754,21 +775,26 @@ bool OurRobot::rxIsFresh(uint64_t age) const
 	return (timestamp() - _radioRx.timestamp()) < age;
 }
 
-
-
-
 uint64_t OurRobot::lastKickTime() const {
 	return _lastKickTime;
 }
 
-
-void OurRobot::setRadioRx(Packet::RadioRx rx) {
-	_radioRx = rx;
-
-	if ( rx.kicker_status() < _lastKickerStatus ) {
+void OurRobot::radioRxUpdated() {
+	if ( _radioRx.kicker_status() < _lastKickerStatus ) {
 		_lastKickTime = timestamp();
 	}
-	_lastKickerStatus = rx.kicker_status();
-	//	FIXME: implement
+	_lastKickerStatus = _radioRx.kicker_status();
 }
 
+double OurRobot::distanceToChipLanding(int chipPower) {
+	return max(0., min(190., *(config->chipper.calibrationSlope) * chipPower + *(config->chipper.calibrationOffset)));
+}
+
+uint8_t OurRobot::chipPowerForDistance(double distance) {
+	double b = *(config->chipper.calibrationOffset) / 2.;
+	if(distance < b)
+		return 0;
+	if(distance > distanceToChipLanding(255))
+		return 255;
+	return 0.5 * distance + b;
+}
