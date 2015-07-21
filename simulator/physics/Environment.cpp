@@ -42,6 +42,8 @@ Environment::Environment(const QString& configFile, bool sendShared_, SimEngine*
 	_field = new Field(this);
 	_field->initPhysics();
 	loadConfigFile(_configFile);
+
+    _lastRadioTxTime = timestamp();
 }
 
 Environment::~Environment() {
@@ -388,6 +390,8 @@ Robot *Environment::robot(bool blue, int board_id) const
 
 void Environment::handleRadioTx(bool blue, const Packet::RadioTx& tx)
 {
+    _lastRadioTxTime = timestamp();
+
 	for (int i = 0; i < tx.robots_size(); ++i)
 	{
 		const Packet::RadioTx::Robot &cmd = tx.robots(i);

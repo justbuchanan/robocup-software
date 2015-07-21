@@ -44,9 +44,9 @@ static void glutDisplayCallback(void) {
 
 // SimulatorGLUTThread implementation
 
-SimulatorGLUTThread::SimulatorGLUTThread(int argc, char* argv[], const QString& configFile, bool sendShared, bool showWindow)
+SimulatorGLUTThread::SimulatorGLUTThread(int argc, char* argv[], const QString& configFile, bool sendShared, bool showWindow, boost::optional<int> timeout)
 : _argv(argv), _argc(argc), _env(0), _vehicle(0), _blue(false),
-  _camera(0), _cameraHeight(4.f), _minCameraDistance(3.f), _maxCameraDistance(10.f), _showWindow(showWindow), _stopped(false)
+  _camera(0), _cameraHeight(4.f), _minCameraDistance(3.f), _maxCameraDistance(10.f), _showWindow(showWindow), _stopped(false), _timeout(timeout)
 {
 	initialize(configFile, sendShared);
 }
@@ -95,6 +95,12 @@ void SimulatorGLUTThread::run() {
 	} else {
 		while (true) {
 			if (_stopped) return;
+
+            //  return if we've gone a while without receiving any RadioTx packets
+            if (_timeout && (timestamp() - _env->lastRadioTxTime()) / 1000000 > *_timeout) {
+                std::cout << "timeout!" << endl;
+                return;
+            }
 			stepSimulation();
 			usleep(16667);	//	wait 1/60 seconds
 		}

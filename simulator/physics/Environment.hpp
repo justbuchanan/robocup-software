@@ -20,6 +20,7 @@
 #include "FastTimer.hpp"
 #include "SimEngine.hpp"
 #include "GL_ShapeDrawer.h"
+#include <time.hpp>
 
 
 class SSL_DetectionRobot;
@@ -122,6 +123,10 @@ public:
 
 	bool loadConfigFile();
 
+    Time lastRadioTxTime() const {
+        return _lastRadioTxTime;
+    }
+
 private:
 	static void convert_robot(const Robot *robot, SSL_DetectionRobot *out);
 	void handleRadioTx(bool blue, const Packet::RadioTx& data);
@@ -145,6 +150,8 @@ private:
 		}
 		return true;
 	}
+
+    Time _lastRadioTxTime;
 
 	// Returns true if any robot occludes a ball from a camera's point of view.
 	bool occluded(Geometry2d::Point ball, Geometry2d::Point camera);

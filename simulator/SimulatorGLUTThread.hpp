@@ -3,6 +3,7 @@
 #include <map>
 #include <memory>
 
+#include <boost/optional.hpp>
 #include <QThread>
 
 #include <physics/SimEngine.hpp>
@@ -46,7 +47,7 @@ public:
 	typedef std::shared_ptr<SimulatorGLUTThread> shared_ptr;
 
 	/** need to pass arguments through to glut */
-	SimulatorGLUTThread(int argc, char* argv[], const QString& configFile, bool sendShared, bool showWindow = true);
+	SimulatorGLUTThread(int argc, char* argv[], const QString& configFile, bool sendShared, bool showWindow = true, boost::optional<int> timeout = boost::none);
 
 	~SimulatorGLUTThread();
 
@@ -59,9 +60,11 @@ public:
 private:
 	// Re-implement the run function to start the process
 	void run();
-	
+
 	QMutex _mutex;
 	bool _stopped;
+
+    boost::optional<int> _timeout;
 
 
 public:
