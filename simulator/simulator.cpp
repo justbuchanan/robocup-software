@@ -24,6 +24,7 @@ void usage(const char* prog)
 	fprintf(stderr, "\t--help            Show usage message\n");
 	fprintf(stderr, "\t--sv              Use shared vision multicast port\n");
 	fprintf(stderr, "\t--headless        Run the simulator in headless mode (without a GUI)\n");
+    fprintf(stderr, "\t--smallfield      Run the simulator with the small/single field.\n");
     fprintf(stderr, "\t--timeout seconds The simulator exits after a set amount of time of receiving no RadioTx packets\n");
 }
 
@@ -31,7 +32,8 @@ int main(int argc, char* argv[])
 {
 	QApplication app(argc, argv);
 
-	Field_Dimensions::Current_Dimensions = Field_Dimensions::Single_Field_Dimensions * scaling;
+    // Default to double size field, switch to single if flag is set.
+    Field_Dimensions::Current_Dimensions = Field_Dimensions::Double_Field_Dimensions * scaling;
 
 	QString configFile = "simulator.cfg";
 	bool sendShared = false;
@@ -74,6 +76,8 @@ int main(int argc, char* argv[])
                 printf("Expected timeout value in seconds after --timeout parameter\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--smallfield") == 0) {
+            Field_Dimensions::Current_Dimensions = Field_Dimensions::Single_Field_Dimensions * scaling;
 		} else {
 			printf("%s is not recognized as a valid flag\n", argv[i]);
 			return 1;
